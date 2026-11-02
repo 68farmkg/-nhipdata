@@ -1,0 +1,1 @@
+Thư mục này để trống — các workflow sẽ tự tạo file dữ liệu vào đây.
