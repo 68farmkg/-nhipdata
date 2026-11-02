@@ -1,0 +1,127 @@
+# Dựng LỊCH SỬ khối ngoại (số đã chốt cuối phiên) -> data/history.json  (+ data/history-status.json để chẩn đoán)
+# Đặt tại: .github/workflows/history.yml   (XÓA file cũ .github/workflows/foreign.yml nếu nội dung của nó là bản fetch-history)
+# Chạy tay lần đầu: Actions > fetch-history > Run workflow. Sau đó tự chạy 16:30 giờ VN, thứ 2-6.
+# An toàn: lần chạy lỗi/thiếu dữ liệu KHÔNG ghi đè history.json tốt; ngày cũ được giữ lại và cộng dồn (tối đa 400 phiên).
+name: fetch-history
+on:
+  schedule:
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: fxh
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Dung lich su khoi ngoai
+        run: |
+          node --input-type=module - <<'EOF'
+          import fs from 'node:fs';
+          const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+          const H = { 'Accept': 'application/json', 'User-Agent': UA };
+          const DAYS = 260, KEEP = 400, MAX_FAIL = 0.03;
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const num = v => { if (v === null || v === undefined || v === '' || typeof v === 'boolean') return null; const n = Number(v); return isFinite(n) ? n : null; };
+          const EXS = ['HOSE', 'HNX', 'UPCOM'];
+          const status = { at: new Date().toISOString(), ok: false };
+          const writeStatus = () => { fs.mkdirSync('data', { recursive: true }); fs.writeFileSync('data/history-status.json', JSON.stringify(status)); };
+          const fail = msg => { status.error = msg; writeStatus(); console.log('LỖI:', msg, '— giữ nguyên data/history.json cũ'); process.exit(1); };
+
+          /* lịch sử cũ (để cộng dồn và để không bao giờ ghi đè bằng dữ liệu xấu) */
+          let oldDays = [];
+          try { const o = JSON.parse(fs.readFileSync('data/history.json', 'utf8')); if (o && o.ok && Array.isArray(o.days)) oldDays = o.days; } catch (e) { }
+
+          /* 1) danh sách mã + sàn từ Vietcap (công khai) */
+          const B = 'https://trading.vietcap.com.vn';
+          let list = [];
+          for (let t = 0; t < 3 && !list.length; t++) {
+            try { const ra = await fetch(B + '/api/price/symbols/getAll', { headers: Object.assign({ Origin: B, Referer: B + '/' }, H) }); if (ra.ok) { const all = await ra.json(); list = Array.isArray(all) ? all : (all && all.data) || []; } else status.listHttp = ra.status; } catch (e) { }
+            if (!list.length) await sleep(1500 * (t + 1));
+          }
+          const exOf = { HSX: 'HOSE', HOSE: 'HOSE', HNX: 'HNX', UPCOM: 'UPCOM' }, ex = {};
+          for (const x of list) if (x && x.type === 'STOCK' && exOf[x.board] && /^[A-Z0-9.]{2,12}$/.test(String(x.symbol))) ex[x.symbol] = exOf[x.board];
+          const syms = Object.keys(ex);
+          console.log('Số mã:', syms.length);
+          if (syms.length < 500) fail('Danh sách mã quá ít (' + syms.length + ')');
+
+          /* 2) khối ngoại theo ngày của từng mã. Tên trường được DÒ tự động, ghi vào mapping */
+          const URL1 = c => 'https://api-finfo.vndirect.com.vn/v4/foreigns?q=code:' + c + '&size=' + DAYS + '&sort=tradingDate:desc';
+          async function one(c) {
+            for (let t = 0; t < 3; t++) {
+              try {
+                const r = await fetch(URL1(c), { headers: H });
+                if (r.status === 429 || r.status >= 500) { await sleep(800 * (t + 1)); continue; }
+                if (!r.ok) return { err: 'HTTP ' + r.status };
+                const j = await r.json(); return { rows: Array.isArray(j && j.data) ? j.data : [] };
+              } catch (e) { await sleep(500 * (t + 1)); }
+            }
+            return { err: 'không kết nối được' };
+          }
+          let K = null, failed = 0; const per = {};
+          const pick = (keys, test, ban) => keys.filter(k => test(k.toLowerCase()) && !(ban && ban(k.toLowerCase()))).sort((a, b) => a.length - b.length)[0] || null;
+          const detect = rec => { const k = Object.keys(rec); return { date: pick(k, x => x === 'tradingdate' || x === 'date'), buyQ: pick(k, x => /buy/.test(x) && /(vol|qty)/.test(x), x => /net|put|deal/.test(x)), sellQ: pick(k, x => /sell/.test(x) && /(vol|qty)/.test(x), x => /net|put|deal/.test(x)), buyV: pick(k, x => /buy/.test(x) && /val/.test(x), x => /net|put|deal/.test(x)), sellV: pick(k, x => /sell/.test(x) && /val/.test(x), x => /net|put|deal/.test(x)) }; };
+          const queue = syms.slice();
+          async function worker() {
+            while (queue.length) {
+              const c = queue.shift(), r = await one(c);
+              if (r.err) { failed++; if (failed <= 5) console.log('lỗi', c, r.err); continue; }
+              if (!r.rows.length) continue;
+              if (!K) { K = detect(r.rows[0]); status.mapping = K; console.log('Ánh xạ:', JSON.stringify(K)); }
+              if (!K.date || !K.buyV || !K.sellV) continue;
+              per[c] = r.rows;
+              await sleep(120);
+            }
+          }
+          await Promise.all(Array.from({ length: 6 }, worker));
+          status.failed = failed; status.symbolsWithData = Object.keys(per).length;
+          if (failed > syms.length * MAX_FAIL) fail('Quá nhiều mã lỗi (' + failed + '/' + syms.length + ') — nguồn đang chặn hoặc quá tải, thử lại sau');
+          if (!K || !K.date || !K.buyV || !K.sellV) fail('Không dò được tên trường: ' + JSON.stringify(K));
+
+          /* 3) cộng theo ngày + sàn */
+          const agg = {};
+          for (const c of Object.keys(per)) {
+            const e = ex[c];
+            for (const r of per[c]) {
+              const d = String(r[K.date] || '').slice(0, 10); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+              const bv = num(r[K.buyV]), sv = num(r[K.sellV]); if (bv == null && sv == null) continue;
+              const a = (agg[d] || (agg[d] = { d })), x = (a[e] || (a[e] = { buyV: 0, sellV: 0, buyQ: 0, sellQ: 0, tv: 0, n: 0 }));
+              x.buyV += bv || 0; x.sellV += sv || 0; x.buyQ += (K.buyQ ? num(r[K.buyQ]) : 0) || 0; x.sellQ += (K.sellQ ? num(r[K.sellQ]) : 0) || 0; x.n++;
+            }
+          }
+          let days = Object.values(agg).filter(a => EXS.reduce((s, k) => s + (a[k] ? a[k].buyV + a[k].sellV : 0), 0) > 0).sort((a, b) => a.d < b.d ? -1 : 1);
+          /* KHÔNG lưu phiên hôm nay nếu chưa quá 15:30 giờ VN (số tạm của phiên đang chạy không phải số chốt) */
+          const ict = new Date(Date.now() + 7 * 3600e3), today = ict.toISOString().slice(0, 10), mins = ict.getUTCHours() * 60 + ict.getUTCMinutes();
+          if (mins < 15 * 60 + 30) days = days.filter(a => a.d !== today);
+          /* bỏ ngày thiếu dữ liệu nặng (ít hơn 60% số mã của ngày đầy đủ nhất) */
+          const cnt = a => EXS.reduce((s, k) => s + (a[k] ? a[k].n : 0), 0), mx = Math.max(0, ...days.map(cnt));
+          const dropped = days.filter(a => cnt(a) < mx * 0.6).map(a => a.d); days = days.filter(a => cnt(a) >= mx * 0.6);
+          if (days.length < 20) fail('Chỉ dựng được ' + days.length + ' ngày (cần ≥ 20)');
+          /* không cho bản mới ngắn hơn hẳn bản cũ */
+          if (oldDays.length >= 50 && days.length < Math.min(oldDays.length, DAYS) * 0.6) fail('Bản mới (' + days.length + ' ngày) ngắn hơn hẳn bản cũ (' + oldDays.length + ' ngày)');
+
+          /* 4) cộng dồn: ngày cũ giữ lại, ngày mới ghi đè (số đã chốt/điều chỉnh mới nhất) */
+          const m = {}; for (const x of oldDays) if (x && x.d) m[x.d] = x; for (const x of days) m[x.d] = x;
+          const merged = Object.keys(m).sort().map(d => m[d]).slice(-KEEP), last = merged[merged.length - 1];
+          const out = { ok: true, built: new Date().toISOString(), source: 'VNDirect foreigns (số đã chốt cuối phiên) qua GitHub Actions', mapping: K, symbolsWithData: status.symbolsWithData, failed, dropped: dropped.slice(-15), lastDay: last.d, lastDayTy: {}, days: merged };
+          for (const k of EXS) if (last[k]) out.lastDayTy[k] = { mua: Math.round(last[k].buyV / 1e7) / 100, ban: Math.round(last[k].sellV / 1e7) / 100, mãCó: last[k].n };
+          fs.mkdirSync('data', { recursive: true }); fs.writeFileSync('data/history.json', JSON.stringify(out));
+          Object.assign(status, { ok: true, days: merged.length, firstDay: merged[0].d, lastDay: last.d, newDays: days.length });
+          writeStatus();
+          console.log('Số ngày:', merged.length, '| từ', merged[0].d, 'đến', last.d, '| tỷ đồng:', JSON.stringify(out.lastDayTy), '| mã lỗi:', failed);
+          EOF
+      - name: Luu ket qua
+        if: always()
+        run: |
+          git config user.name "fx-bot"
+          git config user.email "fx-bot@users.noreply.github.com"
+          git add data/history.json data/history-status.json
+          git diff --cached --quiet || (git commit -m "history $(date -u +%FT%TZ)" && git pull --rebase -q && git push)
+          
