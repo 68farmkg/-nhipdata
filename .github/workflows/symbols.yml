@@ -1,0 +1,28 @@
+# Danh sách mã đầy đủ 3 sàn -> data/symbols.json (HUB đọc qua GH_DATA_URL). Chạy tay lần đầu, sau đó 06:00 giờ VN mỗi ngày.
+name: fetch-symbols
+on:
+  schedule:
+    - cron: '0 23 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: symbols
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/symbols.mjs
+      - name: Luu ket qua
+        if: always()
+        run: |
+          git config user.name "fx-bot"
+          git config user.email "fx-bot@users.noreply.github.com"
+          git add data/symbols.json
+          git diff --cached --quiet || (git commit -m "symbols $(date -u +%FT%TZ)" && git pull --rebase -q && git push)
