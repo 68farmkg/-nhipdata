@@ -1,0 +1,31 @@
+# Thông báo/tin chính thức HOSE · HNX · UBCKNN -> data/announcements.json (+ announcements-status.json)
+# Chạy tay lần đầu: Actions > fetch-announcements > Run workflow, rồi mở data/announcements-status.json xem nguồn nào sống.
+name: fetch-announcements
+on:
+  schedule:
+    - cron: '*/30 1-9 * * 1-5'   # 08:00-16:30 giờ VN, thứ 2-6, mỗi 30 phút
+    - cron: '30 13 * * *'        # 20:30 giờ VN mỗi ngày
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: announcements
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Lay thong bao chinh thuc
+        run: node scripts/announcements.mjs
+      - name: Luu ket qua
+        if: always()
+        run: |
+          git config user.name "fx-bot"
+          git config user.email "fx-bot@users.noreply.github.com"
+          git add data/announcements.json data/announcements-status.json
+          git diff --cached --quiet || (git commit -m "announcements $(date -u +%FT%TZ)" && git pull --rebase -q && git push)
