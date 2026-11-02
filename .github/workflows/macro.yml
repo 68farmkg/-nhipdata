@@ -1,0 +1,31 @@
+# Dựng số liệu vĩ mô (FRED + World Bank) -> data/macro.json (+ data/macro-status.json để chẩn đoán)
+# Chạy tay lần đầu: Actions > fetch-macro > Run workflow. Sau đó tự chạy 07:15 giờ VN mỗi ngày (00:15 UTC) và 20:45 giờ VN (13:45 UTC).
+name: fetch-macro
+on:
+  schedule:
+    - cron: '15 0 * * *'
+    - cron: '45 13 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: macro
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Dung so lieu vi mo
+        run: node scripts/macro.mjs
+      - name: Luu ket qua
+        if: always()
+        run: |
+          git config user.name "fx-bot"
+          git config user.email "fx-bot@users.noreply.github.com"
+          git add data/macro.json data/macro-status.json
+          git diff --cached --quiet || (git commit -m "macro $(date -u +%FT%TZ)" && git pull --rebase -q && git push)
