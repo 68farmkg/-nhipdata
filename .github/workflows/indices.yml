@@ -1,0 +1,35 @@
+# Bảng 29 chỉ số (điểm, hiệu suất, KL, GT, khối ngoại ròng, thỏa thuận, vốn hóa) -> data/indices.json
+# Chạy tay lần đầu (Actions > fetch-indices > Run workflow) rồi đọc data/indices-status.json để biết nguồn nào sống.
+# Lịch (giờ VN): mỗi 30 phút 09:00-15:30 T2-T6; 15:45 ngay sau đóng cửa; 17:30 khi số thỏa thuận đã chốt.
+name: fetch-indices
+on:
+  schedule:
+    - cron: '*/30 2-8 * * 1-5'
+    - cron: '45 8 * * 1-5'
+    - cron: '30 10 * * 1-5'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: indices
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Kiem tra ham thuan
+        run: node scripts/indices.test.mjs
+      - name: Dung bang chi so
+        run: node scripts/indices.mjs
+      - name: Luu ket qua
+        if: always()
+        run: |
+          git config user.name "fx-bot"
+          git config user.email "fx-bot@users.noreply.github.com"
+          git add data/indices.json data/indices-status.json data/index-members.json data/index-members-manual.json
+          git diff --cached --quiet || (git commit -m "indices $(date -u +%FT%TZ)" && git pull --rebase -q && git push)
